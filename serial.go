@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -177,7 +178,7 @@ func (sp *SerialPort) SendFile(filepath string) error {
 }
 
 // Wait for a defined regular expression for a defined amount of time.
-func (sp *SerialPort) WaitForRegexTimeout(exp string, timeout time.Duration) (string, error) {
+func (sp *SerialPort) WaitForRegexTimeout(exp string, timeout time.Duration) ([]string, error) {
 
 	if sp.portIsOpen {
 		//Decode received data
@@ -186,15 +187,15 @@ func (sp *SerialPort) WaitForRegexTimeout(exp string, timeout time.Duration) (st
 		regExpPatttern := regexp.MustCompile(exp)
 
 		//Timeout structure
-		c1 := make(chan string, 1)
+		c1 := make(chan []string, 1)
 		go func() {
 			sp.log("INF >> Waiting for RegExp: \"%s\"", exp)
 			result := []string{}
 			for !timeExpired {
 				line := <-sp.rxLine
-				result = regExpPatttern.FindAllString(line, -1)
+				result = regExpPatttern.FindStringSubmatch(line)
 				if len(result) > 0 {
-					c1 <- result[0]
+					c1 <- result
 					break
 				}
 			}
@@ -202,17 +203,17 @@ func (sp *SerialPort) WaitForRegexTimeout(exp string, timeout time.Duration) (st
 		select {
 		case data := <-c1:
 			sp.log("INF >> The RegExp: \"%s\"", exp)
-			sp.log("INF >> Has been matched: \"%s\"", data)
+			sp.log("INF >> Has been matched: \"%s\"", data[0])
 			return data, nil
 		case <-time.After(timeout):
 			timeExpired = true
 			sp.log("INF >> Unable to match RegExp: \"%s\"", exp)
-			return "", fmt.Errorf("Timeout expired")
+			return nil, fmt.Errorf("Timeout expired")
 		}
 	} else {
-		return "", fmt.Errorf("Serial port is not open")
+		return nil, fmt.Errorf("Serial port is not open")
 	}
-	return "", nil
+	return nil, nil
 }
 
 // Change end of line character (AKA EOL), newline character (ASCII 10, LF, '\n') is used by default.
@@ -251,7 +252,7 @@ func (sp *SerialPort) processSerialPort() {
 				if sp.OnRxData != nil {
 					sp.OnRxData(data)
 				}
-				sp.rxLine <- string(data)
+				sp.rxLine <- strings.Trim(string(data), "\r\n")
 				sp.log("Rx << %q", data)
 				screenBuff = make([]byte, 0) //Clean buffer
 				break
