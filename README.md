@@ -1,4 +1,4 @@
-# Forked from https://github.com/argandas/sim900
+# Forked from https://github.com/argandas/serial
 
 # Serial
 
