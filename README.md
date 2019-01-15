@@ -1,3 +1,5 @@
+# Forked from https://github.com/argandas/sim900
+
 # Serial
 
 Golang package for serial port
@@ -9,7 +11,7 @@ A Go package that allow you to read and write from the serial port.
 This is a forked repo written by [@tarm](github.com/tarm).
 
 ## Install
-go get github.com/argandas/serial
+`go get github.com/vinhjaxt/serial`
 
 ## Usage
 
