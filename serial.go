@@ -1,7 +1,6 @@
 package serial
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -26,10 +25,11 @@ type SerialPort struct {
 	rxChar        chan byte
 	closeReqChann chan bool
 	closeAckChann chan error
-	buff          *bytes.Buffer
 	logger        *log.Logger
 	portIsOpen    bool
 	Verbose       bool
+	rxLine        chan string
+	OnRxData      func([]byte)
 	// openPort      func(port string, baud int) (io.ReadWriteCloser, error)
 }
 
@@ -45,10 +45,10 @@ func New() *SerialPort {
 	}
 	multi := io.MultiWriter(file, os.Stdout)
 	return &SerialPort{
-		logger:  log.New(multi, "PREFIX: ", log.Ldate|log.Ltime),
-		eol:     EOL_DEFAULT,
-		buff:    bytes.NewBuffer(make([]uint8, 256)),
-		Verbose: true,
+		logger:   log.New(multi, "PREFIX: ", log.Ldate|log.Ltime),
+		eol:      EOL_DEFAULT,
+		Verbose:  true,
+		OnRxData: nil,
 	}
 }
 
@@ -71,9 +71,9 @@ func (sp *SerialPort) Open(name string, baud int, timeout ...time.Duration) erro
 	sp.baud = baud
 	sp.port = comPort
 	sp.portIsOpen = true
-	sp.buff.Reset()
 	// Open channels
 	sp.rxChar = make(chan byte)
+	sp.rxLine = make(chan string)
 	// Enable threads
 	go sp.readSerialPort()
 	go sp.processSerialPort()
@@ -87,6 +87,7 @@ func (sp *SerialPort) Close() error {
 	if sp.portIsOpen {
 		sp.portIsOpen = false
 		close(sp.rxChar)
+		close(sp.rxLine)
 		sp.log("Serial port %s closed", sp.name)
 		return sp.port.Close()
 	}
@@ -175,35 +176,6 @@ func (sp *SerialPort) SendFile(filepath string) error {
 	return nil
 }
 
-// Read the first byte of the serial buffer.
-func (sp *SerialPort) Read() (byte, error) {
-	if sp.portIsOpen {
-		return sp.buff.ReadByte()
-	} else {
-		return 0x00, fmt.Errorf("Serial port is not open")
-	}
-	return 0x00, nil
-}
-
-// Read first available line from serial port buffer.
-//
-// Line is delimited by the EOL character, newline character (ASCII 10, LF, '\n') is used by default.
-//
-// The text returned from ReadLine does not include the line end ("\r\n" or '\n').
-func (sp *SerialPort) ReadLine() (string, error) {
-	if sp.portIsOpen {
-		line, err := sp.buff.ReadString(sp.eol)
-		if err != nil {
-			return "", err
-		} else {
-			return removeEOL(line), nil
-		}
-	} else {
-		return "", fmt.Errorf("Serial port is not open")
-	}
-	return "", nil
-}
-
 // Wait for a defined regular expression for a defined amount of time.
 func (sp *SerialPort) WaitForRegexTimeout(exp string, timeout time.Duration) (string, error) {
 
@@ -219,15 +191,11 @@ func (sp *SerialPort) WaitForRegexTimeout(exp string, timeout time.Duration) (st
 			sp.log("INF >> Waiting for RegExp: \"%s\"", exp)
 			result := []string{}
 			for !timeExpired {
-				line, err := sp.ReadLine()
-				if err != nil {
-					// Do nothing
-				} else {
-					result = regExpPatttern.FindAllString(line, -1)
-					if len(result) > 0 {
-						c1 <- result[0]
-						break
-					}
+				line := <-sp.rxLine
+				result = regExpPatttern.FindAllString(line, -1)
+				if len(result) > 0 {
+					c1 <- result[0]
+					break
 				}
 			}
 		}()
@@ -247,11 +215,6 @@ func (sp *SerialPort) WaitForRegexTimeout(exp string, timeout time.Duration) (st
 	return "", nil
 }
 
-// Available return the total number of available unread bytes on the serial buffer.
-func (sp *SerialPort) Available() int {
-	return sp.buff.Len()
-}
-
 // Change end of line character (AKA EOL), newline character (ASCII 10, LF, '\n') is used by default.
 func (sp *SerialPort) EOL(c byte) {
 	sp.eol = c
@@ -265,8 +228,6 @@ func (sp *SerialPort) readSerialPort() {
 	rxBuff := make([]byte, 256)
 	for sp.portIsOpen {
 		n, _ := sp.port.Read(rxBuff)
-		// Write data to serial buffer
-		sp.buff.Write(rxBuff[:n])
 		for _, b := range rxBuff[:n] {
 			if sp.portIsOpen {
 				sp.rxChar <- b
@@ -285,7 +246,13 @@ func (sp *SerialPort) processSerialPort() {
 			switch lastRxByte {
 			case sp.eol:
 				// EOL - Print received data
-				sp.log("Rx << %s", string(append(screenBuff, lastRxByte)))
+				data := append(screenBuff, lastRxByte)
+				// Write data to serial buffer
+				if sp.OnRxData != nil {
+					sp.OnRxData(data)
+				}
+				sp.rxLine <- string(data)
+				sp.log("Rx << %q", data)
 				screenBuff = make([]byte, 0) //Clean buffer
 				break
 			default:
