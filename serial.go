@@ -7,31 +7,25 @@ import (
 	"log"
 	"os"
 	"regexp"
-	"strings"
+	"sync/atomic"
 	"time"
 )
 
-// End of line character (AKA EOL), newline character (ASCII 10, CR, '\n'). is used by default.
-const EOL_DEFAULT byte = '\n'
+const rxDataTimeout = 20 * time.Millisecond
 
 /*******************************************************************************************
 *******************************   TYPE DEFINITIONS 	****************************************
 *******************************************************************************************/
 
 type SerialPort struct {
-	port          io.ReadWriteCloser
-	name          string
-	baud          int
-	eol           uint8
-	rxChar        chan byte
-	closeReqChann chan bool
-	closeAckChann chan error
-	logger        *log.Logger
-	portIsOpen    bool
-	Verbose       bool
-	rxLine        chan string
-	OnRxData      func([]byte)
-	// openPort      func(port string, baud int) (io.ReadWriteCloser, error)
+	Port       io.ReadWriteCloser
+	PortIsOpen int32
+	Verbose    bool
+	OnRxData   func([]byte)
+	rxChar     chan byte
+	logger     *log.Logger
+	rxData     chan string
+	rxTimer    <-chan time.Time
 }
 
 /*******************************************************************************************
@@ -46,16 +40,16 @@ func New() *SerialPort {
 	}
 	multi := io.MultiWriter(file, os.Stdout)
 	return &SerialPort{
-		logger:   log.New(multi, "PREFIX: ", log.Ldate|log.Ltime),
-		eol:      EOL_DEFAULT,
-		Verbose:  true,
-		OnRxData: nil,
+		logger:     log.New(multi, "PREFIX: ", log.Ldate|log.Ltime),
+		Verbose:    true,
+		OnRxData:   nil,
+		PortIsOpen: 0,
 	}
 }
 
 func (sp *SerialPort) Open(name string, baud int, timeout ...time.Duration) error {
 	// Check if port is open
-	if sp.portIsOpen {
+	if atomic.LoadInt32(&sp.PortIsOpen) == 1 {
 		return fmt.Errorf("\"%s\" is already open", name)
 	}
 	var readTimeout time.Duration
@@ -67,38 +61,49 @@ func (sp *SerialPort) Open(name string, baud int, timeout ...time.Duration) erro
 	if err != nil {
 		return fmt.Errorf("Unable to open port \"%s\" - %s", name, err)
 	}
+	atomic.StoreInt32(&sp.PortIsOpen, 1)
 	// Open port succesfull
-	sp.name = name
-	sp.baud = baud
-	sp.port = comPort
-	sp.portIsOpen = true
+	sp.Port = comPort
 	// Open channels
 	sp.rxChar = make(chan byte)
-	sp.rxLine = make(chan string)
+	sp.rxData = make(chan string)
 	// Enable threads
 	go sp.readSerialPort()
 	go sp.processSerialPort()
-	sp.logger.SetPrefix(fmt.Sprintf("[%s] ", sp.name))
-	sp.log("Serial port %s@%d open", sp.name, sp.baud)
+	sp.logger.SetPrefix(fmt.Sprintf("[%s] ", name))
+	sp.log("Serial port %s@%d open", name, baud)
 	return nil
 }
 
 // This method close the current Serial Port.
 func (sp *SerialPort) Close() error {
-	if sp.portIsOpen {
-		sp.portIsOpen = false
+	if atomic.LoadInt32(&sp.PortIsOpen) == 1 {
+		atomic.StoreInt32(&sp.PortIsOpen, 0)
+		go func() {
+			for {
+				select {
+				case <-sp.rxChar:
+					break
+				case <-sp.rxData:
+					break
+				case <-sp.rxTimer:
+					break
+				}
+			}
+		}()
+		time.Sleep(100 * time.Millisecond)
 		close(sp.rxChar)
-		close(sp.rxLine)
-		sp.log("Serial port %s closed", sp.name)
-		return sp.port.Close()
+		close(sp.rxData)
+		sp.log("Serial port closed")
+		return sp.Port.Close()
 	}
 	return nil
 }
 
 // This method prints data trough the serial port.
 func (sp *SerialPort) Write(data []byte) (n int, err error) {
-	if sp.portIsOpen {
-		n, err = sp.port.Write(data)
+	if atomic.LoadInt32(&sp.PortIsOpen) == 1 {
+		n, err = sp.Port.Write(data)
 		if err != nil {
 			// Do nothing
 		} else {
@@ -112,8 +117,8 @@ func (sp *SerialPort) Write(data []byte) (n int, err error) {
 
 // This method prints data trough the serial port.
 func (sp *SerialPort) Print(str string) error {
-	if sp.portIsOpen {
-		_, err := sp.port.Write([]byte(str))
+	if atomic.LoadInt32(&sp.PortIsOpen) == 1 {
+		_, err := sp.Port.Write([]byte(str))
 		if err != nil {
 			return err
 		} else {
@@ -163,7 +168,7 @@ func (sp *SerialPort) SendFile(filepath string) error {
 				data = file[sentBytes:]
 			}
 			// Write binaries
-			_, err := sp.port.Write(data)
+			_, err := sp.Port.Write(data)
 			if err != nil {
 				sp.log("DBG >> %s", "Error while sending the file")
 				return err
@@ -180,7 +185,7 @@ func (sp *SerialPort) SendFile(filepath string) error {
 // Wait for a defined regular expression for a defined amount of time.
 func (sp *SerialPort) WaitForRegexTimeout(exp string, timeout time.Duration) ([]string, error) {
 
-	if sp.portIsOpen {
+	if atomic.LoadInt32(&sp.PortIsOpen) == 1 {
 		//Decode received data
 		timeExpired := false
 
@@ -191,19 +196,22 @@ func (sp *SerialPort) WaitForRegexTimeout(exp string, timeout time.Duration) ([]
 		go func() {
 			sp.log("INF >> Waiting for RegExp: \"%s\"", exp)
 			result := []string{}
+			lines := ""
 			for !timeExpired {
-				line := <-sp.rxLine
-				result = regExpPatttern.FindStringSubmatch(line)
+				lines += <-sp.rxData
+				result = regExpPatttern.FindStringSubmatch(lines)
 				if len(result) > 0 {
+					lines = ""
 					c1 <- result
 					break
 				}
 			}
+			lines = ""
 		}()
 		select {
 		case data := <-c1:
 			sp.log("INF >> The RegExp: \"%s\"", exp)
-			sp.log("INF >> Has been matched: \"%s\"", data[0])
+			sp.log("INF >> Has been matched: %q", data[0])
 			return data, nil
 		case <-time.After(timeout):
 			timeExpired = true
@@ -216,21 +224,16 @@ func (sp *SerialPort) WaitForRegexTimeout(exp string, timeout time.Duration) ([]
 	return nil, nil
 }
 
-// Change end of line character (AKA EOL), newline character (ASCII 10, LF, '\n') is used by default.
-func (sp *SerialPort) EOL(c byte) {
-	sp.eol = c
-}
-
 /*******************************************************************************************
 ******************************   PRIVATE FUNCTIONS  ****************************************
 *******************************************************************************************/
 
 func (sp *SerialPort) readSerialPort() {
 	rxBuff := make([]byte, 256)
-	for sp.portIsOpen {
-		n, _ := sp.port.Read(rxBuff)
+	for atomic.LoadInt32(&sp.PortIsOpen) == 1 {
+		n, _ := sp.Port.Read(rxBuff)
 		for _, b := range rxBuff[:n] {
-			if sp.portIsOpen {
+			if atomic.LoadInt32(&sp.PortIsOpen) == 1 {
 				sp.rxChar <- b
 			}
 		}
@@ -238,26 +241,28 @@ func (sp *SerialPort) readSerialPort() {
 }
 
 func (sp *SerialPort) processSerialPort() {
-	screenBuff := make([]byte, 0)
+	var screenBuff []byte
 	var lastRxByte byte
+
 	for {
-		if sp.portIsOpen {
-			lastRxByte = <-sp.rxChar
-			// Print received lines
-			switch lastRxByte {
-			case sp.eol:
-				// EOL - Print received data
-				data := append(screenBuff, lastRxByte)
-				// Write data to serial buffer
-				if sp.OnRxData != nil {
-					sp.OnRxData(data)
-				}
-				sp.rxLine <- strings.Trim(string(data), "\r\n")
-				sp.log("Rx << %q", data)
-				screenBuff = make([]byte, 0) //Clean buffer
-				break
-			default:
+		if atomic.LoadInt32(&sp.PortIsOpen) == 1 {
+			select {
+			case lastRxByte = <-sp.rxChar:
 				screenBuff = append(screenBuff, lastRxByte)
+				sp.rxTimer = time.After(rxDataTimeout)
+				break
+			case <-sp.rxTimer:
+				if screenBuff == nil {
+					break
+				}
+				if sp.OnRxData != nil {
+					sp.OnRxData(screenBuff)
+				}
+
+				sp.log("Rx << %q", screenBuff)
+				sp.rxData <- string(screenBuff)
+				screenBuff = nil //Clean buffer
+				break
 			}
 		} else {
 			break
@@ -269,43 +274,4 @@ func (sp *SerialPort) log(format string, a ...interface{}) {
 	if sp.Verbose {
 		sp.logger.Printf(format, a...)
 	}
-}
-
-func removeEOL(line string) string {
-	var data []byte
-	// Remove CR byte "\r"
-	for _, b := range []byte(line) {
-		switch b {
-		case '\r':
-			// Do nothing
-		case '\n':
-			// Do nothing
-		default:
-			data = append(data, b)
-		}
-	}
-	return string(data)
-}
-
-// Converts the timeout values for Linux / POSIX systems
-func posixTimeoutValues(readTimeout time.Duration) (vmin uint8, vtime uint8) {
-	const MAXUINT8 = 1<<8 - 1 // 255
-	// set blocking / non-blocking read
-	var minBytesToRead uint8 = 1
-	var readTimeoutInDeci int64
-	if readTimeout > 0 {
-		// EOF on zero read
-		minBytesToRead = 0
-		// convert timeout to deciseconds as expected by VTIME
-		readTimeoutInDeci = (readTimeout.Nanoseconds() / 1e6 / 100)
-		// capping the timeout
-		if readTimeoutInDeci < 1 {
-			// min possible timeout 1 Deciseconds (0.1s)
-			readTimeoutInDeci = 1
-		} else if readTimeoutInDeci > MAXUINT8 {
-			// max possible timeout is 255 deciseconds (25.5s)
-			readTimeoutInDeci = MAXUINT8
-		}
-	}
-	return minBytesToRead, uint8(readTimeoutInDeci)
 }
