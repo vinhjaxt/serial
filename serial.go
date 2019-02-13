@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -18,12 +19,14 @@ const rxDataTimeout = 20 * time.Millisecond
 *******************************************************************************************/
 
 type SerialPort struct {
+	fileLog    *log.Logger
+	ReadingRx  sync.Mutex
+	NeedRx     int32
 	Port       io.ReadWriteCloser
 	PortIsOpen int32
 	Verbose    bool
 	OnRxData   func([]byte)
 	rxChar     chan byte
-	logger     *log.Logger
 	rxData     chan string
 	rxTimer    <-chan time.Time
 }
@@ -34,16 +37,12 @@ type SerialPort struct {
 
 func New() *SerialPort {
 	// Create new file
-	file, err := os.OpenFile(fmt.Sprintf("log_serial_%d.txt", time.Now().Unix()), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	if err != nil {
-		log.Fatalln("Failed to open log file", ":", err)
-	}
-	multi := io.MultiWriter(file, os.Stdout)
 	return &SerialPort{
-		logger:     log.New(multi, "PREFIX: ", log.Ldate|log.Ltime),
 		Verbose:    true,
 		OnRxData:   nil,
 		PortIsOpen: 0,
+		ReadingRx:  sync.Mutex{},
+		fileLog:    nil,
 	}
 }
 
@@ -62,6 +61,14 @@ func (sp *SerialPort) Open(name string, baud int, timeout ...time.Duration) erro
 		return fmt.Errorf("Unable to open port \"%s\" - %s", name, err)
 	}
 	atomic.StoreInt32(&sp.PortIsOpen, 1)
+	if sp.Verbose == false {
+		file, err := os.OpenFile(fmt.Sprintf("log_serial_%d.txt", time.Now().Unix()), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+		if err != nil {
+			log.Fatalln("Failed to open log file:", err)
+		}
+		sp.fileLog = log.New(file, "PREFIX: ", log.Ldate|log.Ltime)
+		sp.fileLog.SetPrefix(fmt.Sprintf("[%s] ", name))
+	}
 	// Open port succesfull
 	sp.Port = comPort
 	// Open channels
@@ -70,30 +77,27 @@ func (sp *SerialPort) Open(name string, baud int, timeout ...time.Duration) erro
 	// Enable threads
 	go sp.readSerialPort()
 	go sp.processSerialPort()
-	sp.logger.SetPrefix(fmt.Sprintf("[%s] ", name))
 	sp.log("Serial port %s@%d open", name, baud)
 	return nil
 }
 
-// This method close the current Serial Port.
+// Close close the current Serial Port.
 func (sp *SerialPort) Close() error {
+	sp.Println("\x1A")
 	if atomic.LoadInt32(&sp.PortIsOpen) == 1 {
 		atomic.StoreInt32(&sp.PortIsOpen, 0)
 		go func() {
-			for {
-				select {
-				case <-sp.rxChar:
-					break
-				case <-sp.rxData:
-					break
-				case <-sp.rxTimer:
-					break
-				}
-			}
+			defer func() {
+				recover()
+			}()
+			close(sp.rxChar)
 		}()
-		time.Sleep(100 * time.Millisecond)
-		close(sp.rxChar)
-		close(sp.rxData)
+		go func() {
+			defer func() {
+				recover()
+			}()
+			close(sp.rxData)
+		}()
 		sp.log("Serial port closed")
 		return sp.Port.Close()
 	}
@@ -183,7 +187,7 @@ func (sp *SerialPort) SendFile(filepath string) error {
 }
 
 // Wait for a defined regular expression for a defined amount of time.
-func (sp *SerialPort) WaitForRegexTimeout(exp string, timeout time.Duration) ([]string, error) {
+func (sp *SerialPort) WaitForRegexTimeout(cmd, exp string, timeout time.Duration) ([]string, error) {
 
 	if atomic.LoadInt32(&sp.PortIsOpen) == 1 {
 		//Decode received data
@@ -193,6 +197,8 @@ func (sp *SerialPort) WaitForRegexTimeout(exp string, timeout time.Duration) ([]
 
 		//Timeout structure
 		c1 := make(chan []string, 1)
+		sp.ReadingRx.Lock()
+		atomic.StoreInt32(&sp.NeedRx, 1)
 		go func() {
 			sp.log("INF >> Waiting for RegExp: \"%s\"", exp)
 			result := []string{}
@@ -206,8 +212,16 @@ func (sp *SerialPort) WaitForRegexTimeout(exp string, timeout time.Duration) ([]
 					break
 				}
 			}
-			lines = ""
+			atomic.StoreInt32(&sp.NeedRx, 0)
+			sp.ReadingRx.Unlock()
 		}()
+
+		// Send command
+		if cmd != "" {
+			if err := sp.Println(cmd); err != nil {
+				return nil, err
+			}
+		}
 		select {
 		case data := <-c1:
 			sp.log("INF >> The RegExp: \"%s\"", exp)
@@ -216,12 +230,11 @@ func (sp *SerialPort) WaitForRegexTimeout(exp string, timeout time.Duration) ([]
 		case <-time.After(timeout):
 			timeExpired = true
 			sp.log("INF >> Unable to match RegExp: \"%s\"", exp)
-			return nil, fmt.Errorf("Timeout expired")
+			return nil, fmt.Errorf("Timeout expired \"%s\"", exp)
 		}
 	} else {
 		return nil, fmt.Errorf("Serial port is not open")
 	}
-	return nil, nil
 }
 
 /*******************************************************************************************
@@ -260,7 +273,10 @@ func (sp *SerialPort) processSerialPort() {
 				}
 
 				sp.log("Rx << %q", screenBuff)
-				sp.rxData <- string(screenBuff)
+
+				if atomic.LoadInt32(&sp.NeedRx) == 1 {
+					sp.rxData <- string(screenBuff)
+				}
 				screenBuff = nil //Clean buffer
 				break
 			}
@@ -272,6 +288,8 @@ func (sp *SerialPort) processSerialPort() {
 
 func (sp *SerialPort) log(format string, a ...interface{}) {
 	if sp.Verbose {
-		sp.logger.Printf(format, a...)
+		log.Printf(format, a...)
+	} else if sp.fileLog != nil {
+		sp.fileLog.Printf(format, a...)
 	}
 }
