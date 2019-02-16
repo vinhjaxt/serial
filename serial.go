@@ -193,7 +193,7 @@ func (sp *SerialPort) WaitForRegexTimeout(cmd, exp string, timeout time.Duration
 		//Decode received data
 		timeExpired := false
 
-		regExpPatttern := regexp.MustCompile(exp)
+		regExpPattern := regexp.MustCompile(exp)
 
 		//Timeout structure
 		c1 := make(chan []string, 1)
@@ -205,7 +205,7 @@ func (sp *SerialPort) WaitForRegexTimeout(cmd, exp string, timeout time.Duration
 			lines := ""
 			for !timeExpired {
 				lines += <-sp.rxData
-				result = regExpPatttern.FindStringSubmatch(lines)
+				result = regExpPattern.FindStringSubmatch(lines)
 				if len(result) > 0 {
 					lines = ""
 					c1 <- result
