@@ -169,7 +169,7 @@ func (sp *SerialPort) SendFile(filepath string) error {
 }
 
 // WaitForRegexTimeout wait for a defined regular expression for a defined amount of time.
-func (sp *SerialPort) WaitForRegexTimeout(cmd, exp string, timeout time.Duration) ([]string, error) {
+func (sp *SerialPort) WaitForRegexTimeout(cmd, exp string, timeout time.Duration, inits ...func() error) ([]string, error) {
 	if atomic.LoadInt32(&sp.Opened) == 1 {
 		timeExpired := false
 		regExpPattern := regexp.MustCompile(exp)
@@ -195,6 +195,13 @@ func (sp *SerialPort) WaitForRegexTimeout(cmd, exp string, timeout time.Duration
 
 		if cmd != "" {
 			if err := sp.Println(cmd); err != nil {
+				return nil, err
+			}
+		}
+
+		for _, fn := range inits {
+			err := fn()
+			if err != nil {
 				return nil, err
 			}
 		}
