@@ -67,8 +67,8 @@ func (sp *SerialPort) Open(name string, baud int, timeout ...time.Duration) erro
 	}
 
 	sp.Port = comPort
-	sp.rxChar = make(chan byte)
-	sp.rxData = make(chan string)
+	sp.rxChar = make(chan byte, 512)
+	sp.rxData = make(chan string, 16)
 
 	go sp.readSerialPort()
 	go sp.processSerialPort()
