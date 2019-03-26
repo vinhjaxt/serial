@@ -275,7 +275,7 @@ func (sp *SerialPort) processSerialPort() {
 				for _, fn := range sp.eventMap {
 					sp.eventMapLock.RUnlock()
 					go fn(screenBuff)
-					sp.eventMapLock.Lock()
+					sp.eventMapLock.RLock()
 				}
 				sp.eventMapLock.RUnlock()
 				sp.log("Rx << %q", screenBuff)
