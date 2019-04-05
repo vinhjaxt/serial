@@ -206,7 +206,7 @@ func (sp *SerialPort) WaitForRegexTimeout(cmd, exp string, timeout time.Duration
 		sp.RxMu.Unlock()
 	}()
 
-	time.Sleep(rxDataTimeout)
+	time.Sleep(rxDataTimeout) // sleep at least 10ms
 
 	if cmd != "" {
 		if err := sp.Println(cmd); err != nil {
