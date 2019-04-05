@@ -176,53 +176,59 @@ func (sp *SerialPort) SendFile(filepath string) error {
 
 // WaitForRegexTimeout wait for a defined regular expression for a defined amount of time.
 func (sp *SerialPort) WaitForRegexTimeout(cmd, exp string, timeout time.Duration, inits ...func() error) ([]string, error) {
-	if atomic.LoadInt32(&sp.Opened) == 1 {
-		timeExpired := false
-		regExpPattern := regexp.MustCompile(exp)
-		c1 := make(chan []string, 1)
-		sp.RxMu.Lock()
-		atomic.StoreInt32(&sp.NeedRx, 1)
-		go func() {
-			sp.log(">> Waiting: \"%s\"", exp)
-			result := []string{}
-			lines := ""
-			for !timeExpired {
-				lines += <-sp.rxData
-				result = regExpPattern.FindStringSubmatch(lines)
-				if len(result) > 0 {
-					lines = ""
-					c1 <- result
-					break
-				}
-			}
-			atomic.StoreInt32(&sp.NeedRx, 0)
-			sp.RxMu.Unlock()
-		}()
-
-		if cmd != "" {
-			if err := sp.Println(cmd); err != nil {
-				return nil, err
-			}
-		}
-
-		for _, fn := range inits {
-			err := fn()
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		select {
-		case data := <-c1:
-			sp.log(">> Matched: %q", data[0])
-			return data, nil
-		case <-time.After(timeout):
-			timeExpired = true
-			sp.log(">> Failed: \"%s\" \"%s\"", cmd, exp)
-			return nil, fmt.Errorf("Timeout \"%s\" \"%s\"", cmd, exp)
-		}
-	} else {
+	if atomic.LoadInt32(&sp.Opened) != 1 {
 		return nil, errors.New("Port is not opened")
+	}
+
+	var timeExpired int32
+	regExpPattern, err := regexp.Compile(exp)
+	if err != nil {
+		return nil, err
+	}
+
+	ret := make(chan []string, 1)
+	sp.RxMu.Lock()
+	atomic.StoreInt32(&sp.NeedRx, 1)
+
+	go func() {
+		sp.log(">> Waiting: \"%s\"", exp)
+		result := []string{}
+		lines := ""
+		for atomic.LoadInt32(&timeExpired) == 0 {
+			lines += <-sp.rxData
+			result = regExpPattern.FindStringSubmatch(lines)
+			if len(result) > 0 {
+				ret <- result
+				break
+			}
+		}
+		atomic.StoreInt32(&sp.NeedRx, 0)
+		sp.RxMu.Unlock()
+	}()
+
+	time.Sleep(rxDataTimeout)
+
+	if cmd != "" {
+		if err := sp.Println(cmd); err != nil {
+			return nil, err
+		}
+	}
+
+	for _, fn := range inits {
+		err := fn()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	select {
+	case data := <-ret:
+		sp.log(">> Matched: %q", data[0])
+		return data, nil
+	case <-time.After(timeout):
+		atomic.StoreInt32(&timeExpired, 1)
+		sp.log(">> Failed: \"%s\" \"%s\"", cmd, exp)
+		return nil, fmt.Errorf("Timeout \"%s\" \"%s\"", cmd, exp)
 	}
 }
 
