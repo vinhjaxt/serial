@@ -27,7 +27,7 @@ type SerialPort struct {
 	eventMap     map[uint32]func([]byte)
 	eventNextID  uint32
 	eventMapLock *sync.RWMutex
-	rxChar       chan byte
+	rxBuff       chan []byte
 	rxData       chan string
 	rxTimer      <-chan time.Time
 }
@@ -73,7 +73,7 @@ func (sp *SerialPort) Open(name string, baud int, timeout ...time.Duration) erro
 	}
 
 	sp.Port = comPort
-	sp.rxChar = make(chan byte, 512)
+	sp.rxBuff = make(chan []byte, 16)
 	sp.rxData = make(chan string, 16)
 
 	go sp.readSerialPort()
@@ -87,7 +87,7 @@ func (sp *SerialPort) Close() error {
 	sp.Println("\x1A")
 	if atomic.LoadInt32(&sp.Opened) == 1 {
 		atomic.StoreInt32(&sp.Opened, 0)
-		close(sp.rxChar)
+		close(sp.rxBuff)
 		close(sp.rxData)
 		sp.log("Port closed")
 		return sp.Port.Close()
@@ -232,17 +232,16 @@ func (sp *SerialPort) readSerialPort() {
 	for atomic.LoadInt32(&sp.Opened) == 1 {
 		n, err := sp.Port.Read(rxBuff)
 		if err != nil {
-			if err != io.EOF {
-				atomic.StoreInt32(&sp.Opened, 0)
-				log.Println(err)
-				return
+			if err != nil {
+				if err != io.EOF {
+					atomic.StoreInt32(&sp.Opened, 0)
+					log.Println(err)
+					return
+				}
 			}
 		}
-		for _, b := range rxBuff[:n] {
-			if atomic.LoadInt32(&sp.Opened) != 1 {
-				break
-			}
-			sp.rxChar <- b
+		if n > 0 {
+			sp.rxBuff <- append([]byte(nil), rxBuff[:n]...)
 		}
 	}
 }
@@ -270,11 +269,11 @@ func (sp *SerialPort) processSerialPort() {
 		}
 	}()
 	var screenBuff []byte
-	var lastRxByte byte
+	var rxByte []byte
 	for atomic.LoadInt32(&sp.Opened) == 1 {
 		select {
-		case lastRxByte = <-sp.rxChar:
-			screenBuff = append(screenBuff, lastRxByte)
+		case rxByte = <-sp.rxBuff:
+			screenBuff = append(screenBuff, rxByte...)
 			sp.rxTimer = time.After(rxDataTimeout)
 			break
 		case <-sp.rxTimer:
