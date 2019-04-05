@@ -16,6 +16,7 @@ import (
 const rxDataTimeout = 20 * time.Millisecond
 
 type SerialPort struct {
+	LogFileName  string
 	fileLog      *log.Logger
 	TxMu         *sync.Mutex
 	RxMu         *sync.Mutex
@@ -62,7 +63,8 @@ func (sp *SerialPort) Open(name string, baud int, timeout ...time.Duration) erro
 
 	atomic.StoreInt32(&sp.Opened, 1)
 	if sp.Verbose == false {
-		file, err := os.OpenFile(fmt.Sprintf("log_serial_%d.txt", time.Now().Unix()), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+		sp.LogFileName = fmt.Sprintf("log_serial_%d.log", time.Now().UnixNano())
+		file, err := os.OpenFile(sp.LogFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 		if err != nil {
 			log.Println(err)
 		}
@@ -216,8 +218,8 @@ func (sp *SerialPort) WaitForRegexTimeout(cmd, exp string, timeout time.Duration
 			return data, nil
 		case <-time.After(timeout):
 			timeExpired = true
-			sp.log(">> Failed: \"%s\"", exp)
-			return nil, fmt.Errorf("Timeout \"%s\"", exp)
+			sp.log(">> Failed: \"%s\" \"%s\"", cmd, exp)
+			return nil, fmt.Errorf("Timeout \"%s\" \"%s\"", cmd, exp)
 		}
 	} else {
 		return nil, errors.New("Port is not opened")
