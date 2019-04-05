@@ -97,35 +97,32 @@ func (sp *SerialPort) Close() error {
 
 // This method prints data trough the serial port.
 func (sp *SerialPort) Write(data []byte) (n int, err error) {
-	if atomic.LoadInt32(&sp.Opened) == 1 {
-		sp.TxMu.Lock()
-		n, err = sp.Port.Write(data)
-		sp.TxMu.Unlock()
-		if err != nil {
-			// Do nothing
-		} else {
-			sp.log("Tx >> %s", string(data))
-		}
-	} else {
+	if atomic.LoadInt32(&sp.Opened) != 1 {
 		err = errors.New("Port is not opened")
+		return
 	}
+	sp.TxMu.Lock()
+	n, err = sp.Port.Write(data)
+	sp.TxMu.Unlock()
+	if err != nil {
+		return
+	}
+	sp.log("Tx >> %s", string(data))
 	return
 }
 
 // Print send data to port
 func (sp *SerialPort) Print(str string) error {
-	if atomic.LoadInt32(&sp.Opened) == 1 {
-		sp.TxMu.Lock()
-		_, err := sp.Port.Write([]byte(str))
-		sp.TxMu.Unlock()
-		if err != nil {
-			return err
-		} else {
-			sp.log("Tx >> %s", str)
-		}
-	} else {
+	if atomic.LoadInt32(&sp.Opened) != 1 {
 		return errors.New("Port is not opened")
 	}
+	sp.TxMu.Lock()
+	_, err := sp.Port.Write([]byte(str))
+	sp.TxMu.Unlock()
+	if err != nil {
+		return err
+	}
+	sp.log("Tx >> %s", str)
 	return nil
 }
 
@@ -152,24 +149,22 @@ func (sp *SerialPort) SendFile(filepath string) error {
 	file, err := ioutil.ReadFile(filepath)
 	if err != nil {
 		return err
-	} else {
-		fileSize := len(file)
-		sp.TxMu.Lock()
-		defer sp.TxMu.Unlock()
-		for sentBytes <= fileSize {
-			if len(file[sentBytes:]) > q {
-				data = file[sentBytes:(sentBytes + q)]
-			} else {
-				data = file[sentBytes:]
-			}
-			_, err := sp.Port.Write(data)
-			if err != nil {
-				return err
-			} else {
-				sentBytes += q
-				time.Sleep(time.Millisecond * 100)
-			}
+	}
+	fileSize := len(file)
+	sp.TxMu.Lock()
+	defer sp.TxMu.Unlock()
+	for sentBytes <= fileSize {
+		if len(file[sentBytes:]) > q {
+			data = file[sentBytes:(sentBytes + q)]
+		} else {
+			data = file[sentBytes:]
 		}
+		_, err := sp.Port.Write(data)
+		if err != nil {
+			return err
+		}
+		sentBytes += q
+		time.Sleep(time.Millisecond * 100)
 	}
 	return nil
 }
@@ -235,13 +230,19 @@ func (sp *SerialPort) WaitForRegexTimeout(cmd, exp string, timeout time.Duration
 func (sp *SerialPort) readSerialPort() {
 	rxBuff := make([]byte, 256)
 	for atomic.LoadInt32(&sp.Opened) == 1 {
-		n, _ := sp.Port.Read(rxBuff)
+		n, err := sp.Port.Read(rxBuff)
+		if err != nil {
+			if err != io.EOF {
+				atomic.StoreInt32(&sp.Opened, 0)
+				log.Println(err)
+				return
+			}
+		}
 		for _, b := range rxBuff[:n] {
-			if atomic.LoadInt32(&sp.Opened) == 1 {
-				sp.rxChar <- b
-			} else {
+			if atomic.LoadInt32(&sp.Opened) != 1 {
 				break
 			}
+			sp.rxChar <- b
 		}
 	}
 }
@@ -264,36 +265,34 @@ func (sp *SerialPort) AddOutputListener(fn func([]byte)) uint32 {
 
 func (sp *SerialPort) processSerialPort() {
 	defer func() {
-		recover()
+		if r := recover(); r != nil {
+			log.Panicln(r)
+		}
 	}()
 	var screenBuff []byte
 	var lastRxByte byte
-	for {
-		if atomic.LoadInt32(&sp.Opened) == 1 {
-			select {
-			case lastRxByte = <-sp.rxChar:
-				screenBuff = append(screenBuff, lastRxByte)
-				sp.rxTimer = time.After(rxDataTimeout)
-				break
-			case <-sp.rxTimer:
-				if screenBuff == nil {
-					break
-				}
-				sp.eventMapLock.RLock()
-				for _, fn := range sp.eventMap {
-					sp.eventMapLock.RUnlock()
-					go fn(screenBuff)
-					sp.eventMapLock.RLock()
-				}
-				sp.eventMapLock.RUnlock()
-				sp.log("Rx << %q", screenBuff)
-				if atomic.LoadInt32(&sp.NeedRx) == 1 {
-					sp.rxData <- string(screenBuff)
-				}
-				screenBuff = nil //Clean buffer
+	for atomic.LoadInt32(&sp.Opened) == 1 {
+		select {
+		case lastRxByte = <-sp.rxChar:
+			screenBuff = append(screenBuff, lastRxByte)
+			sp.rxTimer = time.After(rxDataTimeout)
+			break
+		case <-sp.rxTimer:
+			if screenBuff == nil {
 				break
 			}
-		} else {
+			sp.eventMapLock.RLock()
+			for _, fn := range sp.eventMap {
+				sp.eventMapLock.RUnlock()
+				go fn(screenBuff)
+				sp.eventMapLock.RLock()
+			}
+			sp.eventMapLock.RUnlock()
+			sp.log("Rx << %q", screenBuff)
+			if atomic.LoadInt32(&sp.NeedRx) == 1 {
+				sp.rxData <- string(screenBuff)
+			}
+			screenBuff = nil //Clean buffer
 			break
 		}
 	}
