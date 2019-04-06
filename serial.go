@@ -105,6 +105,7 @@ func (sp *SerialPort) Write(data []byte) (n int, err error) {
 	n, err = sp.Port.Write(data)
 	sp.TxMu.Unlock()
 	if err != nil {
+		atomic.StoreInt32(&sp.Opened, 0)
 		return
 	}
 	sp.log("Tx >> %s", string(data))
@@ -120,6 +121,7 @@ func (sp *SerialPort) Print(str string) error {
 	_, err := sp.Port.Write([]byte(str))
 	sp.TxMu.Unlock()
 	if err != nil {
+		atomic.StoreInt32(&sp.Opened, 0)
 		return err
 	}
 	sp.log("Tx >> %s", str)
@@ -161,6 +163,7 @@ func (sp *SerialPort) SendFile(filepath string) error {
 		}
 		_, err := sp.Port.Write(data)
 		if err != nil {
+			atomic.StoreInt32(&sp.Opened, 0)
 			return err
 		}
 		sentBytes += q
