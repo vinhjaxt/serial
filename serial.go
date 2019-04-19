@@ -200,6 +200,7 @@ func (sp *SerialPort) WaitForRegexTimeout(cmd, exp string, timeout time.Duration
 				break
 			}
 		}
+		sp.log(">> End Waiting \"%s\"", exp)
 		atomic.StoreInt32(&sp.NeedRx, 0)
 		sp.RxMu.Unlock()
 	}()
