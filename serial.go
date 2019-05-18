@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -232,6 +233,12 @@ func (sp *SerialPort) WaitForRegexTimeout(cmd, exp string, timeout time.Duration
 }
 
 func (sp *SerialPort) readSerialPort() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Println(r, string(debug.Stack()))
+		}
+	}()
+
 	rxBuff := make([]byte, 256)
 	for atomic.LoadInt32(&sp.Opened) == 1 {
 		n, err := sp.Port.Read(rxBuff)
@@ -269,7 +276,7 @@ func (sp *SerialPort) AddOutputListener(fn func([]byte)) uint32 {
 func (sp *SerialPort) processSerialPort() {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Panicln(r)
+			log.Println(r, string(debug.Stack()))
 		}
 	}()
 	var screenBuff []byte
