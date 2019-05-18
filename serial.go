@@ -88,8 +88,8 @@ func (sp *SerialPort) Close() error {
 	sp.Println("\x1A")
 	if atomic.LoadInt32(&sp.Opened) == 1 {
 		atomic.StoreInt32(&sp.Opened, 0)
-		close(sp.rxBuff)
-		close(sp.rxData)
+		// close(sp.rxBuff) // dont need that
+		// close(sp.rxData) // dont need that
 		sp.log("Port closed")
 		return sp.Port.Close()
 	}
