@@ -18,7 +18,7 @@ const rxDataTimeout = 20 * time.Millisecond
 
 type SerialPort struct {
 	LogFileName  string
-	fileLog      *log.Logger
+	FileLog      *log.Logger
 	TxMu         *sync.Mutex
 	RxMu         *sync.Mutex
 	NeedRx       int32
@@ -43,7 +43,7 @@ func New() *SerialPort {
 		Opened:       0,
 		TxMu:         &sync.Mutex{},
 		RxMu:         &sync.Mutex{},
-		fileLog:      nil,
+		FileLog:      nil,
 	}
 }
 
@@ -69,8 +69,8 @@ func (sp *SerialPort) Open(name string, baud int, timeout ...time.Duration) erro
 		if err != nil {
 			log.Println(err)
 		}
-		sp.fileLog = log.New(file, "PREFIX: ", log.Ldate|log.Ltime)
-		sp.fileLog.SetPrefix(fmt.Sprintf("[%s] ", name))
+		sp.FileLog = log.New(file, "PREFIX: ", log.Ldate|log.Ltime)
+		sp.FileLog.SetPrefix(fmt.Sprintf("[%s] ", name))
 	}
 
 	sp.Port = comPort
@@ -179,31 +179,41 @@ func (sp *SerialPort) WaitForRegexTimeout(cmd, exp string, timeout time.Duration
 		return nil, errors.New("Port is not opened")
 	}
 
-	var timeExpired int32
+	stopForChan := make(chan struct{}, 1)
 	regExpPattern, err := regexp.Compile(exp)
 	if err != nil {
 		return nil, err
 	}
 
 	ret := make(chan []string, 1)
+	sp.log(">> Waiting RX lock")
 	sp.RxMu.Lock()
+	sp.log(">> RX unlocked")
 	atomic.StoreInt32(&sp.NeedRx, 1)
 
 	go func() {
 		sp.log(">> Waiting: \"%s\"", exp)
+		defer func() {
+			sp.log(">> End Waiting \"%s\"", exp)
+			atomic.StoreInt32(&sp.NeedRx, 0)
+			sp.RxMu.Unlock()
+			sp.log(">> RX free")
+		}()
 		result := []string{}
 		lines := ""
-		for atomic.LoadInt32(&timeExpired) == 0 {
-			lines += <-sp.rxData
-			result = regExpPattern.FindStringSubmatch(lines)
-			if len(result) > 0 {
-				ret <- result
-				break
+		for {
+			select {
+			case <-stopForChan:
+				return
+			case line := <-sp.rxData:
+				lines += line
+				result = regExpPattern.FindStringSubmatch(lines)
+				if len(result) > 0 {
+					ret <- result
+					return
+				}
 			}
 		}
-		sp.log(">> End Waiting \"%s\"", exp)
-		atomic.StoreInt32(&sp.NeedRx, 0)
-		sp.RxMu.Unlock()
 	}()
 
 	time.Sleep(rxDataTimeout) // sleep at least 10ms
@@ -226,8 +236,8 @@ func (sp *SerialPort) WaitForRegexTimeout(cmd, exp string, timeout time.Duration
 		sp.log(">> Matched: %q", data[0])
 		return data, nil
 	case <-time.After(timeout):
-		atomic.StoreInt32(&timeExpired, 1)
-		sp.log(">> Failed: \"%s\" \"%s\"", cmd, exp)
+		stopForChan <- struct{}{}
+		sp.log(">> Timeout: \"%s\" \"%s\"", cmd, exp)
 		return nil, fmt.Errorf("Timeout \"%s\" \"%s\"", cmd, exp)
 	}
 }
@@ -311,7 +321,16 @@ func (sp *SerialPort) processSerialPort() {
 func (sp *SerialPort) log(format string, a ...interface{}) {
 	if sp.Verbose {
 		log.Printf(format, a...)
-	} else if sp.fileLog != nil {
-		sp.fileLog.Printf(format, a...)
+	} else if sp.FileLog != nil {
+		sp.FileLog.Printf(format, a...)
+	}
+}
+
+// Log as this package
+func (sp *SerialPort) Log(a ...interface{}) {
+	if sp.Verbose {
+		log.Println(a...)
+	} else if sp.FileLog != nil {
+		sp.FileLog.Println(a...)
 	}
 }
